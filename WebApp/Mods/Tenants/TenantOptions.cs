@@ -1,4 +1,4 @@
-﻿namespace WebApp
+﻿namespace WebApp.Mods.Tenants
 {
     public class TenantOptions
     {

@@ -1,4 +1,5 @@
 using System.Reflection;
+using WebApp.Mods.Tenants;
 
 namespace WebApp;
 
@@ -10,7 +11,10 @@ public static class Program
             Environment.GetEnvironmentVariable("ASPNETCORE_APPLICATIONNAME") ??
             Assembly.GetEntryAssembly()!.GetName().Name!;
 
-        string envName = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production";
+        string envName =
+            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ??
+            Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ??
+            "Production";
         bool isDevelopment = envName == "Development";
 
         IConfigurationRoot configuration = new ConfigurationBuilder()
@@ -22,6 +26,27 @@ public static class Program
         TenantOptions[] tenantsOptions = configuration
             .GetRequiredSection("Tenants")
             .Get<TenantOptions[]>();
+
+        // Tenant post configuration
+        foreach (var tenant in tenantsOptions)
+        {
+            if (!tenant.Urls.Any())
+                throw new InvalidOperationException($"The {tenant.Id} tenant does not bind to any URLs. It must bind to at least one URL.");
+
+            if (string.IsNullOrWhiteSpace(tenant.Id))
+                tenant.Id = tenant.Urls[0];
+
+            if (string.IsNullOrWhiteSpace(tenant.Startup))
+                tenant.Startup = typeof(Startup).FullName!; // Name of the default startup class
+        }
+
+        var duplicateIds = tenantsOptions.GroupBy(o => o.Id).Where(g => g.Count() > 1).Select(g => g.Key);
+        if (duplicateIds.Any())
+            throw new InvalidOperationException("Every tenant ID must be unique. These are not unique: " + duplicateIds);
+
+        var duplicateUrls = tenantsOptions.SelectMany(o => o.Urls).GroupBy(o => o).Where(g => g.Count() > 1).Select(g => g.Key);
+        if (duplicateUrls.Any())
+            throw new InvalidOperationException("A tenant URL can only be bound once. These URLs are reused: " + duplicateUrls);
 
         //TenantOptions[] tenantsOptions = Enumerable.Range(1, 1000)
         //    .Select(i => new TenantOptions
@@ -38,32 +63,29 @@ public static class Program
             .SelectMany(a => a.ExportedTypes)
             .Where(t =>
                 t.GetCustomAttribute<TenantAttribute>() is not null ||
-                t.Name == "Startup" ||
-                t.IsAssignableTo(typeof(IStartup))
+                (t.Name == "Startup" && t.Namespace == t.Assembly.GetName().Name)
             )
             .ToArray();
 
-        Dictionary<string, Type> startupClassDictionary = startupClasses
+        Dictionary<string, Type> startupTypeLookup = startupClasses
             .ToDictionary(t => t.FullName + ", " + t.Assembly.GetName().Name);
         foreach (var group in startupClasses
-                     .GroupBy(t => t.Name + ", " + t.Assembly.GetName().Name)
-                     .Where(g => g.Count() == 1))
+            .GroupBy(t => t.Name + ", " + t.Assembly.GetName().Name)
+            .Where(g => g.Count() == 1))
         {
-            startupClassDictionary.Add(group.Key, group.First());
+            startupTypeLookup.Add(group.Key, group.First());
         }
-
         foreach (var group in startupClasses
-                     .GroupBy(t => t.FullName!)
-                     .Where(g => g.Count() == 1))
+            .GroupBy(t => t.FullName!)
+            .Where(g => g.Count() == 1))
         {
-            startupClassDictionary.Add(group.Key, group.First());
+            startupTypeLookup.Add(group.Key, group.First());
         }
-
         foreach (var group in startupClasses
-                     .GroupBy(t => t.Name)
-                     .Where(g => g.Count() == 1))
+            .GroupBy(t => t.Name)
+            .Where(g => g.Count() == 1))
         {
-            startupClassDictionary.Add(group.Key, group.First());
+            startupTypeLookup.Add(group.Key, group.First());
         }
 
         var tenantRunners = tenantsOptions
@@ -92,7 +114,7 @@ public static class Program
                         .UseConfiguration(tenantConfiguration)
                         .UseUrls(tenant.Urls)
                         .ConfigureServices(services => services.AddSingleton(tenant))
-                        .UseStartup(startupClassDictionary[tenant.Startup]);
+                        .UseStartup(startupTypeLookup[tenant.Startup]);
                 })
                 .Build()
                 .RunAsync()
